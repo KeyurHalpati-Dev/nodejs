@@ -1,0 +1,194 @@
+name: Build and Deploy Backend to AWS EC2
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  IMAGE_NAME: backend-app
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    # Create Dockerfile dynamically for Node.js backend
+    - name: Create Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        # Use Node.js LTS version
+        FROM node:20-alpine
+        
+        WORKDIR /app
+        
+        # Copy package files
+        COPY package*.json ./
+        
+        # Install dependencies
+        RUN npm ci --only=production
+        
+        # Copy application files
+        COPY . .
+        
+        # Expose backend port
+        EXPOSE 5000
+        
+        # Start the application
+        CMD ["node", "index.js"]
+        EOF
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
+                     -t ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+    
+    - name: Test Docker image
+      run: |
+        docker run --rm -d --name backend-service \
+          -p 5000:5000 \
+          ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+        
+        sleep 10
+        
+        # Check if container is running
+        docker ps | grep backend-service || exit 1
+        
+        # Stop test container
+        docker stop backend-service
+    
+    - name: Push Docker image to Docker Hub
+      run: |
+        docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+        docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    
+    - name: Image digest
+      run: echo "Backend image pushed successfully!"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+    
+    steps:
+    - name: Deploy to AWS EC2
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          echo "🚀 Starting backend deployment on AWS EC2..."
+          
+          # Login to Docker Hub
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          
+          # Pull the latest image
+          echo "📦 Pulling latest Docker image..."
+          docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          
+          # Stop and remove old container if exists
+          echo "🛑 Stopping old container..."
+          docker stop backend-app 2>/dev/null || true
+          docker rm backend-app 2>/dev/null || true
+          
+          # Remove ALL containers using port 5000 (force cleanup)
+          echo "🔍 Checking for any containers on port 5000..."
+          docker ps -a --format "{{.ID}} {{.Ports}}" | grep "5000" | awk '{print $1}' | xargs -r docker stop 2>/dev/null || true
+          docker ps -a --format "{{.ID}} {{.Ports}}" | grep "5000" | awk '{print $1}' | xargs -r docker rm -f 2>/dev/null || true
+          
+          # Kill any process using port 5000
+          echo "🔍 Checking for processes on port 5000..."
+          PID=$(ss -tlnp 2>/dev/null | grep ":5000" | awk '{print $6}' | sed 's/.*pid=//;s/,.*//' | head -1)
+          if [ ! -z "$PID" ]; then
+            echo "⚠️  Found process $PID using port 5000, killing it..."
+            kill -9 $PID 2>/dev/null || true
+            sleep 2
+          fi
+          
+          # Double check with fuser as backup
+          if command -v fuser >/dev/null 2>&1; then
+            fuser -k 5000/tcp 2>/dev/null || true
+            sleep 1
+          fi
+          
+          # Run new container
+          echo "▶️  Starting new container..."
+          docker run -d \
+            --name backend-app \
+            -p 5000:5000 \
+            --restart unless-stopped \
+            -e NODE_ENV=production \
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          
+          # Wait for container to start
+          sleep 5
+          
+          # Check if container is running
+          if docker ps | grep -q backend-app; then
+            echo "✅ Container is running successfully!"
+            docker ps | grep backend-app
+          else
+            echo "❌ Container failed to start!"
+            echo "Container logs:"
+            docker logs backend-app
+            exit 1
+          fi
+          
+          # Clean up old Docker images (keep last 3)
+          echo "🧹 Cleaning up old images..."
+          docker images | grep "${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}" | tail -n +4 | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
+          
+          # Show container status
+          echo "📊 Current container status:"
+          docker ps -a | grep backend-app
+          
+          echo "🎉 Deployment completed successfully!"
+    
+    - name: Verify Deployment
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          echo "🔍 Verifying deployment..."
+          
+          # Check container logs (last 30 lines)
+          echo "📋 Container logs:"
+          docker logs --tail 30 backend-app
+          
+          # Check container health
+          echo "🏥 Container health check:"
+          docker inspect backend-app --format='{{.State.Status}}'
+          
+          # Test if app is responding
+          echo "🌐 Testing application response..."
+          curl -f http://localhost:5000 || echo "⚠️  Warning: Application not responding on port 5000"
+          
+          echo "✅ Verification complete!"
+    
+    - name: Deployment notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "🎉 ✅ Backend deployment successful!"
+          echo "Your backend is now running at http://${{ secrets.EC2_HOST }}:5000"
+        else
+          echo "❌ Backend deployment failed!"
+          echo "Check the logs above for more details."
+        fi
