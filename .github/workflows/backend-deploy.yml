@@ -46,19 +46,12 @@ jobs:
         # Expose backend port
         EXPOSE 5000
         
-        # Health check
-        HEALTHCHECK --interval=30s --timeout=3s --start-period=40s \
-          CMD node -e "require('http').get('http://localhost:5000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})" || exit 1
+        # Add healthcheck to monitor container health
+        HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+          CMD node -e "require('http').get('http://localhost:5000/api/users', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})" || exit 1
         
         # Start the application
-        # Option 1: If you have a start script in package.json
         CMD ["npm", "start"]
-        
-        # Option 2: Direct node execution (uncomment if needed)
-        # CMD ["node", "index.js"]
-        
-        # Option 3: For debugging (keeps container alive even if app crashes)
-        # CMD ["sh", "-c", "node index.js || tail -f /dev/null"]
         EOF
     
     - name: Set up Docker Buildx
@@ -87,12 +80,19 @@ jobs:
           ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
         
         echo "⏳ Waiting for container to start..."
-        sleep 5
+        sleep 10
         
         # Check if container is still running
         if docker ps | grep -q backend-service; then
           echo "✅ Container is running successfully!"
+          
+          # Test the API endpoint
+          echo "🌐 Testing API endpoint..."
+          curl -f http://localhost:5000/api/users || echo "⚠️  API endpoint not responding"
+          
+          echo "📋 Container logs:"
           docker logs backend-service
+          
           docker stop backend-service
           docker rm backend-service
         else
@@ -166,7 +166,7 @@ jobs:
           echo "🌐 Setting up Docker network..."
           docker network create my-app-network 2>/dev/null || echo "Network already exists"
           
-          # Run new container
+          # Run new container with proper environment variables
           echo "▶️  Starting new container..."
           docker run -d \
             --name backend-app \
@@ -174,10 +174,12 @@ jobs:
             -p 5000:5000 \
             --restart unless-stopped \
             -e NODE_ENV=production \
+            -e PORT=5000 \
             ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
           
           # Wait for container to start
-          sleep 5
+          echo "⏳ Waiting for container to initialize..."
+          sleep 8
           
           # Check if container is running
           if docker ps | grep -q backend-app; then
@@ -190,6 +192,17 @@ jobs:
             exit 1
           fi
           
+          # Wait a bit more for the app to fully start
+          sleep 5
+          
+          # Test the API endpoint
+          echo "🌐 Testing API endpoint..."
+          if curl -f http://localhost:5000/api/users 2>/dev/null; then
+            echo "✅ API is responding correctly!"
+          else
+            echo "⚠️  Warning: API endpoint not responding yet (may need more time to start)"
+          fi
+          
           # Clean up old Docker images (keep last 3)
           echo "🧹 Cleaning up old images..."
           docker images | grep "${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}" | tail -n +4 | awk '{print $3}' | xargs -r docker rmi -f 2>/dev/null || true
@@ -198,7 +211,7 @@ jobs:
           echo "📊 Current container status:"
           docker ps -a | grep backend-app
           
-          echo "🎉 Deployment completed successfully!"
+          echo "🎉 Backend deployment completed successfully!"
     
     - name: Verify Deployment
       uses: appleboy/ssh-action@v1.0.0
@@ -207,19 +220,35 @@ jobs:
         username: ${{ secrets.EC2_USERNAME }}
         key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          echo "🔍 Verifying deployment..."
+          echo "🔍 Verifying backend deployment..."
           
-          # Check container logs (last 30 lines)
+          # Wait a bit more for full startup
+          sleep 3
+          
+          # Check container logs (last 50 lines)
           echo "📋 Container logs:"
-          docker logs --tail 30 backend-app
+          docker logs --tail 50 backend-app
           
           # Check container health
           echo "🏥 Container health check:"
+          HEALTH_STATUS=$(docker inspect backend-app --format='{{.State.Health.Status}}' 2>/dev/null || echo "no healthcheck")
+          echo "Health Status: $HEALTH_STATUS"
           docker inspect backend-app --format='{{.State.Status}}'
           
           # Test if app is responding
           echo "🌐 Testing application response..."
-          curl -f http://localhost:5000 || echo "⚠️  Warning: Application not responding on port 5000"
+          if curl -f -s http://localhost:5000/api/users > /dev/null 2>&1; then
+            echo "✅ Backend API is responding correctly!"
+            echo "Sample response:"
+            curl -s http://localhost:5000/api/users | head -n 20
+          else
+            echo "⚠️  Warning: Application not responding on port 5000"
+            echo "This might be normal if the app is still starting up."
+          fi
+          
+          # Check if backend can be reached from within Docker network
+          echo "🔗 Testing network connectivity..."
+          docker network inspect my-app-network | grep -A 10 "backend-app" || echo "Container not fully connected to network yet"
           
           echo "✅ Verification complete!"
     
@@ -229,6 +258,8 @@ jobs:
         if [ "${{ job.status }}" == "success" ]; then
           echo "🎉 ✅ Backend deployment successful!"
           echo "Your backend is now running at http://${{ secrets.EC2_HOST }}:5000"
+          echo "API endpoint: http://${{ secrets.EC2_HOST }}:5000/api/users"
+          echo "Container name: backend-app (accessible within Docker network)"
         else
           echo "❌ Backend deployment failed!"
           echo "Check the logs above for more details."
