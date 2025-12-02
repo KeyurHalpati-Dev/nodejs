@@ -162,10 +162,15 @@ jobs:
             sleep 1
           fi
           
+          # Create Docker network if it doesn't exist
+          echo "🌐 Setting up Docker network..."
+          docker network create my-app-network 2>/dev/null || echo "Network already exists"
+          
           # Run new container
           echo "▶️  Starting new container..."
           docker run -d \
             --name backend-app \
+            --network my-app-network \
             -p 5000:5000 \
             --restart unless-stopped \
             -e NODE_ENV=production \
