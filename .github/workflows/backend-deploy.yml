@@ -66,10 +66,15 @@ jobs:
         sleep 10
         
         # Check if container is running
-        docker ps | grep backend-service || exit 1
-        
-        # Stop test container
-        docker stop backend-service
+        if docker ps | grep -q backend-service; then
+          echo "✅ Container started successfully"
+          docker logs backend-service
+          docker stop backend-service
+        else
+          echo "❌ Container failed to start"
+          docker logs backend-service 2>&1 || true
+          exit 1
+        fi
     
     - name: Push Docker image to Docker Hub
       run: |
