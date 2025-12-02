@@ -31,16 +31,34 @@ jobs:
         COPY package*.json ./
         
         # Install dependencies
-        RUN npm ci --only=production
+        RUN npm ci
         
         # Copy application files
         COPY . .
         
+        # Create a non-root user for security
+        RUN addgroup -g 1001 -S nodejs && \
+            adduser -S nodejs -u 1001 && \
+            chown -R nodejs:nodejs /app
+        
+        USER nodejs
+        
         # Expose backend port
         EXPOSE 5000
         
+        # Health check
+        HEALTHCHECK --interval=30s --timeout=3s --start-period=40s \
+          CMD node -e "require('http').get('http://localhost:5000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})" || exit 1
+        
         # Start the application
-        CMD ["node", "index.js"]
+        # Option 1: If you have a start script in package.json
+        CMD ["npm", "start"]
+        
+        # Option 2: Direct node execution (uncomment if needed)
+        # CMD ["node", "index.js"]
+        
+        # Option 3: For debugging (keeps container alive even if app crashes)
+        # CMD ["sh", "-c", "node index.js || tail -f /dev/null"]
         EOF
     
     - name: Set up Docker Buildx
@@ -59,20 +77,33 @@ jobs:
     
     - name: Test Docker image
       run: |
-        docker run --rm -d --name backend-service \
+        echo "🧪 Testing Docker image..."
+        
+        # Run container WITHOUT --rm flag so we can inspect logs even if it crashes
+        docker run -d --name backend-service \
           -p 5000:5000 \
+          -e NODE_ENV=test \
+          -e PORT=5000 \
           ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
         
-        sleep 10
+        echo "⏳ Waiting for container to start..."
+        sleep 5
         
-        # Check if container is running
+        # Check if container is still running
         if docker ps | grep -q backend-service; then
-          echo "✅ Container started successfully"
+          echo "✅ Container is running successfully!"
           docker logs backend-service
           docker stop backend-service
+          docker rm backend-service
         else
-          echo "❌ Container failed to start"
-          docker logs backend-service 2>&1 || true
+          echo "❌ Container crashed on startup!"
+          echo ""
+          echo "📋 Container logs:"
+          docker logs backend-service 2>&1 || echo "No logs available"
+          echo ""
+          echo "🔍 Container inspect:"
+          docker inspect backend-service --format='{{.State.Status}}: {{.State.Error}}' || true
+          docker rm backend-service 2>/dev/null || true
           exit 1
         fi
     
