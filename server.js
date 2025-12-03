@@ -15,7 +15,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Static user data
-const users = [ 
+const users = [
   {
     id: 1,
     name: "John Doe Holla",
@@ -67,7 +67,8 @@ app.get('/api/users', (req, res) => {
 // Get user by ID
 app.get('/api/users/:id', (req, res) => {
   const user = users.find(u => u.id === parseInt(req.params.id));
-
+  
+  console.log(user);
   if (!user) {
     return res.status(404).json({
       success: false,
