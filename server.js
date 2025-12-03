@@ -18,7 +18,7 @@ app.use(cors(corsOptions));
 const users = [ 
   {
     id: 1,
-    name: "John Doe",
+    name: "John Doe Holla",
     email: "john.doe@example.com",
     age: 28,
     city: "New York"
