@@ -58,15 +58,28 @@ const users = [
 
 // Get all users
 app.get('/api/users', async (req, res) => {
-  const result = await axios.get('http://dotnet-service:6000/PMS/StaticUser', {
-    'Content-Type': 'application/json',
-  })
-  console.log(result.data);
-  res.json({
-    success: true,
-    count: result,
-    data: result
-  });
+  try {
+    const result = await axios.get('http://dotnet-service:6000/PMS/StaticUser', {
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+    console.log(result.data);
+    res.json({
+      success: true,
+      count: result.data.length,
+      data: result.data
+    });
+  } catch (error) {
+    console.error('Error fetching from dotnet-service:', error.message);
+    // Fallback to static data
+    res.json({
+      success: true,
+      count: users.length,
+      data: users,
+      source: 'fallback'
+    });
+  }
 });
 
 // Get user by ID
