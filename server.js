@@ -56,18 +56,22 @@ const users = [
 // API Routes
 
 // Get all users
-app.get('/api/users', (req, res) => {
+app.get('/api/users', async (req, res) => {
+  const result = await axios.get('http://dotnet-service:6000/PMS/StaticUser', {
+    'Content-Type': 'application/json',
+  })
+  console.log(result.data);
   res.json({
     success: true,
-    count: users.length,
-    data: users
+    count: result,
+    data: result
   });
 });
 
 // Get user by ID
 app.get('/api/users/:id', (req, res) => {
   const user = users.find(u => u.id === parseInt(req.params.id));
-  
+
   console.log(user);
   if (!user) {
     return res.status(404).json({
